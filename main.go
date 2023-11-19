@@ -1,15 +1,17 @@
+// main.go
 package main
 
 import (
     "flag"
     "fmt"
+    "log"
     "os"
     "path/filepath"
-	"strings"
+    "strings"
     "github.com/anacrolix/torrent/metainfo"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 var (
     verboseFlag = flag.Bool("verbose", false, "Enable verbose output")
@@ -32,19 +34,19 @@ func main() {
 
     args := flag.Args()
     if len(args) < 1 {
-        fmt.Println("error: torrent file path is required")
+        log.Println("error: torrent file path is required")
         printUsage()
         os.Exit(1)
     }
 
     filePath, err := filepath.Abs(args[0])
     if err != nil {
-        fmt.Printf("error resolving file path: %v\n", err)
+        log.Printf("error resolving file path: %v\n", err)
         return
     }
 
     if err := validateInputFile(filePath); err != nil {
-        fmt.Println(err)
+        log.Println(err)
         return
     }
 
@@ -52,21 +54,21 @@ func main() {
     if len(args) > 1 {
         outputDir, err = filepath.Abs(args[1])
         if err != nil {
-            fmt.Printf("error resolving output directory path: %v\n", err)
+            log.Printf("error resolving output directory path: %v\n", err)
             return
         }
     }
 
     file, err := openTorrentFile(filePath)
     if err != nil {
-        fmt.Printf("error opening torrent: %v\n", err)
+        log.Printf("error opening torrent: %v\n", err)
         return
     }
     defer file.Close()
 
     metaInfo, err := decodeTorrentFile(file)
     if err != nil {
-        fmt.Printf("error decoding torrent: %v\n", err)
+        log.Printf("error decoding torrent: %v\n", err)
         return
     }
 
@@ -74,11 +76,29 @@ func main() {
 
     savedFilePath, err := saveModifiedFile(metaInfo, filePath, outputDir)
     if err != nil {
-        fmt.Printf("error saving modified torrent: %v\n", err)
+        log.Printf("error saving modified torrent: %v\n", err)
         return
     }
 
-        fmt.Println("modified torrent saved as:", savedFilePath)
+    fileName, err := extractNameFromMetaInfo(metaInfo)
+    if err != nil {
+        log.Printf("error extracting name from metadata: %v\n", err)
+        return
+    }
+
+    totalSize, err := getTotalSize(metaInfo)
+    if err != nil {
+        log.Printf("error calculating total size: %v\n", err)
+        return
+    }
+
+    infoHashString := getInfoHash(metaInfo)
+    fmt.Println("hash:", infoHashString)
+
+    magnetLink := generateMagnetLink(metaInfo, fileName, totalSize)
+    fmt.Println("magnet link:", magnetLink)
+
+    fmt.Println("modified torrent saved as:", savedFilePath)
 }
 
 func openTorrentFile(filePath string) (*os.File, error) {
@@ -93,23 +113,6 @@ func decodeTorrentFile(file *os.File) (*metainfo.MetaInfo, error) {
         fmt.Println("decoding torrent...")
     }
     return metainfo.Load(file)
-}
-
-func modifyMetadata(metaInfo *metainfo.MetaInfo, createdBy, comment string) {
-	if *verboseFlag {
-        fmt.Println("modifying torrent metadata...")
-        fmt.Println("removing the following trackers:")
-        for _, trackers := range metaInfo.AnnounceList {
-            for _, tracker := range trackers {
-                fmt.Println(" -", tracker)
-            }
-        }
-    }
-
-    metaInfo.Announce = ""
-    metaInfo.AnnounceList = nil
-    metaInfo.CreatedBy = createdBy
-    metaInfo.Comment = comment
 }
 
 func saveModifiedFile(metaInfo *metainfo.MetaInfo, originalFilePath, outputPath string) (string, error) {
