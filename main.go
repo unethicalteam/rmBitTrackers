@@ -9,6 +9,7 @@ import (
     "path/filepath"
     "strings"
     "github.com/anacrolix/torrent/metainfo"
+    "runtime"
 )
 
 const version = "1.1.0"
@@ -167,13 +168,18 @@ func validateInputFile(filePath string) error {
 }
 
 func printUsage() {
-    fmt.Println("Usage: rmBitTrackers.exe [options] <torrent-file> [output-path]")
+    exeName := "rmBitTrackers"
+    if runtime.GOOS == "windows" {
+        exeName += ".exe"
+    }
+
+    fmt.Printf("Usage: %s [options] <torrent-file> [output-path]\n", exeName)
     fmt.Println("Options:")
     fmt.Println("  --verbose          Enable verbose output")
     fmt.Println("  --version          Show version information")
     fmt.Println("  --help             Show this help message")
     fmt.Println("\nExamples:")
-    fmt.Println("  rmBitTrackers.exe --verbose example.torrent")
-    fmt.Println("  rmBitTrackers.exe example.torrent ./modified/example.torrent")
-    fmt.Println("  rmBitTrackers.exe --help")
+    fmt.Printf("  %s --verbose example.torrent\n", exeName)
+    fmt.Printf("  %s example.torrent ./modified/example.torrent\n", exeName)
+    fmt.Printf("  %s --help\n", exeName)
 }
