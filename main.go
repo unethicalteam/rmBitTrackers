@@ -2,184 +2,198 @@
 package main
 
 import (
-    "flag"
-    "fmt"
-    "log"
-    "os"
-    "path/filepath"
-    "strings"
-    "github.com/anacrolix/torrent/metainfo"
-    "runtime"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 const version = "1.1.0"
 
 var (
-    verboseFlag = flag.Bool("verbose", false, "Enable verbose output")
-    versionFlag = flag.Bool("version", false, "Show version information")
-    helpFlag    = flag.Bool("help", false, "Show help message")
+	verboseFlag = flag.Bool("verbose", false, "Enable verbose output")
+	versionFlag = flag.Bool("version", false, "Show version information")
+	helpFlag    = flag.Bool("help", false, "Show help message")
 )
 
 func main() {
-    flag.Parse()
+	flag.Parse()
 
-    if *helpFlag {
-        printUsage()
-        return
-    }
+	switch {
+	case *helpFlag:
+		printUsage()
+		return
+	case *versionFlag:
+		fmt.Println("rmBitTrackers version:", version)
+		return
+	}
 
-    if *versionFlag {
-        fmt.Println("rmBitTrackers version:", version)
-        return
-    }
+	args := flag.Args()
+	if len(args) < 1 {
+		logAndExit("Error: Torrent file path is required", 1)
+	}
 
-    args := flag.Args()
-    if len(args) < 1 {
-        log.Println("error: torrent file path is required")
-        printUsage()
-        os.Exit(1)
-    }
+	filePath, err := filepath.Abs(args[0])
+	if err != nil {
+		logAndExit(fmt.Sprintf("Error resolving file path: %v", err), 1)
+	}
 
-    filePath, err := filepath.Abs(args[0])
-    if err != nil {
-        log.Printf("error resolving file path: %v\n", err)
-        return
-    }
+	if err := validateInputFile(filePath); err != nil {
+		logAndExit(fmt.Sprintf("Error validating file: %v", err), 1)
+	}
 
-    if err := validateInputFile(filePath); err != nil {
-        log.Println(err)
-        return
-    }
+	outputDir := getOutputDir(args)
 
-    outputDir := "." // default output directory
-    if len(args) > 1 {
-        outputDir, err = filepath.Abs(args[1])
-        if err != nil {
-            log.Printf("error resolving output directory path: %v\n", err)
-            return
-        }
-    }
+	metaInfo, err := loadMetaInfo(filePath)
+	if err != nil {
+		logAndExit(fmt.Sprintf("Error loading meta info: %v", err), 1)
+	}
 
-    file, err := openTorrentFile(filePath)
-    if err != nil {
-        log.Printf("error opening torrent: %v\n", err)
-        return
-    }
-    defer file.Close()
+	modifyMetadata(metaInfo, "unethicalteam", "trackers removed with https://github.com/unethicalteam/rmBitTrackers")
 
-    metaInfo, err := decodeTorrentFile(file)
-    if err != nil {
-        log.Printf("error decoding torrent: %v\n", err)
-        return
-    }
+	savedFilePath, err := saveModifiedFile(metaInfo, filePath, outputDir)
+	if err != nil {
+		logAndExit(fmt.Sprintf("Error saving modified torrent: %v", err), 1)
+	}
 
-    modifyMetadata(metaInfo, "unethicalteam", "trackers removed with https://github.com/unethicalteam/rmBitTrackers")
+	processMetaInfo(metaInfo)
 
-    savedFilePath, err := saveModifiedFile(metaInfo, filePath, outputDir)
-    if err != nil {
-        log.Printf("error saving modified torrent: %v\n", err)
-        return
-    }
-
-    fileName, err := extractNameFromMetaInfo(metaInfo)
-    if err != nil {
-        log.Printf("error extracting name from metadata: %v\n", err)
-        return
-    }
-
-    totalSize, err := getTotalSize(metaInfo)
-    if err != nil {
-        log.Printf("error calculating total size: %v\n", err)
-        return
-    }
-
-    infoHashString := getInfoHash(metaInfo)
-    fmt.Println("hash:", infoHashString)
-
-    magnetLink := generateMagnetLink(metaInfo, fileName, totalSize)
-    fmt.Println("magnet link:", magnetLink)
-
-    fmt.Println("modified torrent saved as:", savedFilePath)
+	fmt.Printf("Modified torrent saved as: %s\n", savedFilePath)
 }
 
-func openTorrentFile(filePath string) (*os.File, error) {
-    if *verboseFlag {
-        fmt.Println("opening torrent:", filePath)
-    }
-    return os.Open(filePath)
-}
+func loadMetaInfo(filePath string) (*metainfo.MetaInfo, error) {
+	logVerbose("Loading torrent:", filePath)
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("error opening torrent: %v", err)
+	}
+	defer file.Close()
 
-func decodeTorrentFile(file *os.File) (*metainfo.MetaInfo, error) {
-    if *verboseFlag {
-        fmt.Println("decoding torrent...")
-    }
-    return metainfo.Load(file)
+	metaInfo, err := metainfo.Load(file)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding torrent: %v", err)
+	}
+
+	return metaInfo, nil
 }
 
 func saveModifiedFile(metaInfo *metainfo.MetaInfo, originalFilePath, outputPath string) (string, error) {
-    _, fileName := filepath.Split(originalFilePath)
-    var newFilePath string
+	_, fileName := filepath.Split(originalFilePath)
+	newFilePath := getNewFilePath(outputPath, fileName)
 
-    if strings.HasSuffix(outputPath, string(os.PathSeparator)) {
-        err := os.MkdirAll(outputPath, 0755)
-        if err != nil {
-            return "", fmt.Errorf("failed to create directory: %v", err)
-        }
-        newFilePath = filepath.Join(outputPath, fileName)
-    } else {
-        ext := filepath.Ext(outputPath)
-        fileInfo, err := os.Stat(outputPath)
-        if os.IsNotExist(err) && ext == "" {
-            err = os.MkdirAll(outputPath, 0755)
-            if err != nil {
-                return "", fmt.Errorf("failed to create directory: %v", err)
-            }
-            newFilePath = filepath.Join(outputPath, fileName)
-        } else if err == nil && fileInfo.IsDir() {
-            newFilePath = filepath.Join(outputPath, fileName)
-        } else {
-            newFilePath = outputPath
-        }
-    }
+	if err := os.MkdirAll(filepath.Dir(newFilePath), 0755); err != nil {
+		return "", fmt.Errorf("failed to create directory: %v", err)
+	}
 
-    newFile, err := os.Create(newFilePath)
-    if err != nil {
-        return "", fmt.Errorf("failed to create file: %v", err)
-    }
-    defer newFile.Close()
+	newFile, err := os.Create(newFilePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create file: %v", err)
+	}
+	defer newFile.Close()
 
-    err = metaInfo.Write(newFile)
-    if err != nil {
-        return "", fmt.Errorf("failed to write to file: %v", err)
-    }
+	if err := metaInfo.Write(newFile); err != nil {
+		return "", fmt.Errorf("failed to write to file: %v", err)
+	}
 
-    return newFilePath, nil
+	return newFilePath, nil
+}
+
+func processMetaInfo(metaInfo *metainfo.MetaInfo) {
+	var wg sync.WaitGroup
+
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		fileName, err := extractNameFromMetaInfo(metaInfo)
+		if err != nil {
+			log.Printf("Error extracting name from metadata: %v\n", err)
+			return
+		}
+		fmt.Println("File name:", fileName)
+	}()
+
+	go func() {
+		defer wg.Done()
+		totalSize, err := getTotalSize(metaInfo)
+		if err != nil {
+			log.Printf("Error calculating total size: %v\n", err)
+			return
+		}
+		fmt.Println("Total size:", totalSize)
+	}()
+
+	go func() {
+		defer wg.Done()
+		infoHashString := getInfoHash(metaInfo)
+		fmt.Println("Info hash:", infoHashString)
+
+		magnetLink := generateMagnetLink(metaInfo, infoHashString, 0) // Placeholder for fileName and totalSize
+		fmt.Println("Magnet link:", magnetLink)
+	}()
+
+	wg.Wait()
+}
+
+func getNewFilePath(outputPath, fileName string) string {
+	if strings.HasSuffix(outputPath, string(os.PathSeparator)) || !strings.Contains(filepath.Ext(outputPath), ".") {
+		return filepath.Join(outputPath, fileName)
+	}
+	return outputPath
 }
 
 func validateInputFile(filePath string) error {
-    fileInfo, err := os.Stat(filePath)
-    if os.IsNotExist(err) {
-        return fmt.Errorf("file does not exist: %s", filePath)
-    }
-    if fileInfo.IsDir() {
-        return fmt.Errorf("expected a file but got a directory: %s", filePath)
-    }
-    return nil
+	fileInfo, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("file does not exist: %s", filePath)
+	}
+	if fileInfo.IsDir() {
+		return fmt.Errorf("expected a file but got a directory: %s", filePath)
+	}
+	return nil
+}
+
+func getOutputDir(args []string) string {
+	if len(args) > 1 {
+		outputDir, err := filepath.Abs(args[1])
+		if err != nil {
+			logAndExit(fmt.Sprintf("Error resolving output directory path: %v", err), 1)
+		}
+		return outputDir
+	}
+	return "."
 }
 
 func printUsage() {
-    exeName := "rmBitTrackers"
-    if runtime.GOOS == "windows" {
-        exeName += ".exe"
-    }
+	exeName := "rmBitTrackers"
+	if runtime.GOOS == "windows" {
+		exeName += ".exe"
+	}
 
-    fmt.Printf("Usage: %s [options] <torrent-file> [output-path]\n", exeName)
-    fmt.Println("Options:")
-    fmt.Println("  --verbose          Enable verbose output")
-    fmt.Println("  --version          Show version information")
-    fmt.Println("  --help             Show this help message")
-    fmt.Println("\nExamples:")
-    fmt.Printf("  %s --verbose example.torrent\n", exeName)
-    fmt.Printf("  %s example.torrent ./modified/example.torrent\n", exeName)
-    fmt.Printf("  %s --help\n", exeName)
+	fmt.Printf("Usage: %s [options] <torrent-file> [output-path]\n", exeName)
+	fmt.Println("Options:")
+	fmt.Println("  --verbose          Enable verbose output")
+	fmt.Println("  --version          Show version information")
+	fmt.Println("  --help             Show this help message")
+	fmt.Println("\nExamples:")
+	fmt.Printf("  %s --verbose example.torrent\n", exeName)
+	fmt.Printf("  %s example.torrent ./modified/example.torrent\n", exeName)
+	fmt.Printf("  %s --help\n", exeName)
+}
+
+func logVerbose(v ...interface{}) {
+	if *verboseFlag {
+		fmt.Println(v...)
+	}
+}
+
+func logAndExit(message string, code int) {
+	log.Println(message)
+	os.Exit(code)
 }
